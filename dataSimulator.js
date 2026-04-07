@@ -1,51 +1,84 @@
+const express = require("express");
+const http = require("http");
+const cors = require("cors");
+const { Server } = require("socket.io");
+
+const { SerialPort } = require("serialport");
+const { ReadlineParser } = require("@serialport/parser-readline");
+
+const app = express();
+app.use(cors());
+
+const server = http.createServer(app);
+
+const io = new Server(server, {
+    cors: { origin: "*" }
+});
+
+app.get("/", (req, res) => {
+    res.send("Smart Hospital IoT Backend Running");
+});
+
+io.on("connection", (socket) => {
+    console.log("Client connected:", socket.id);
+});
 
 
-function generatePatientRoomData() {
-    return {
-        temperature: (24 + Math.random() * 4).toFixed(2),
-        humidity: (45 + Math.random() * 20).toFixed(2),
-        light: Math.floor(200 + Math.random() * 200),
-        smoke: Math.floor(180 + Math.random() * 80),
-        fire: Math.random() > 0.95 ? 1 : 0,
-        time: new Date().toLocaleTimeString()
-    };
-}
+const port = new SerialPort({
+  path: "COM5",   
+  baudRate: 9600
+});
 
-function generateSecurityData() {
-    return {
-        smoke: Math.floor(180 + Math.random() * 100),
-        flame: Math.random() > 0.97 ? 1 : 0,
-        linkStatus: Math.random() > 0.05 ? 1 : 0,
-        temperature: (25 + Math.random() * 3).toFixed(2),
-        humidity: (50 + Math.random() * 10).toFixed(2),
-        time: new Date().toLocaleTimeString()
-    };
-}
+port.on("open", () => {
+  console.log("Bluetooth serial port opened");
+});
 
-function generateFrontDeskData() {
-    return {
-        doctorsPresent: Math.floor(5 + Math.random() * 5),
-        nursesPresent: Math.floor(10 + Math.random() * 10),
-        attendanceRate: Math.floor(80 + Math.random() * 20),
-        time: new Date().toLocaleTimeString()
-    };
-}
 
-function generateWardData() {
-    const totalBeds = 50;
-    const occupiedBeds = Math.floor(20 + Math.random() * 25);
+port.on("error", (err) => {
+  console.log("Serial error:", err.message);
+});
 
-    return {
-        totalBeds,
-        occupiedBeds,
-        availableBeds: totalBeds - occupiedBeds,
-        time: new Date().toLocaleTimeString()
-    };
-}
+const parser = port.pipe(new ReadlineParser({ delimiter: "\n" }));
 
-module.exports = {
-    generatePatientRoomData,
-    generateSecurityData,
-    generateFrontDeskData,
-    generateWardData
-};
+parser.on("data", (data) => {
+
+    console.log("Bluetooth Data:", data);
+
+    let temperature = null;
+    let humidity = null;
+    let alert = false;
+
+    
+    if (data.includes("ALERT")) {
+        alert = true;
+    }
+
+    
+    const tempMatch = data.match(/Temp:\s*([0-9.]+)/);
+    const humMatch = data.match(/Humidity:\s*([0-9.]+)/);
+
+    if (tempMatch && humMatch) {
+        temperature = parseFloat(tempMatch[1]);
+        humidity = parseFloat(humMatch[1]);
+
+        const hospitalData = {
+            patientRoom: {
+                temperature,
+                humidity,
+                alert,
+                time: new Date().toLocaleTimeString()
+            }
+        };
+
+        io.emit("hospitalData", hospitalData);
+    }
+
+});
+
+
+
+const PORT = 5001;
+
+server.listen(PORT, () => {
+    console.log("Server running on port", PORT);
+});
