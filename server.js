@@ -2,9 +2,10 @@ const express = require("express");
 const http = require("http");
 const cors = require("cors");
 const { Server } = require("socket.io");
-
+const sendSMS = require("./sms");
 const { SerialPort } = require("serialport");
 const { ReadlineParser } = require("@serialport/parser-readline");
+require("dotenv").config();
 
 const app = express();
 app.use(cors());
@@ -32,33 +33,62 @@ app.post("/attendance", (req, res) => {
 
   if (!name) return res.status(400).json({ error: "Name required" });
 
-  // prevent duplicate clock-ins same person same day
-  const duplicate = attendanceLog.find(
+  // check if person already has a record today
+  const existing = attendanceLog.find(
     r => r.name === name && r.date === date
   );
 
-  if (duplicate) {
-    console.log(`Already clocked in: ${name}`);
-    return res.json({ message: "Already clocked in", record: duplicate });
+  if (existing) {
+    // second recognition = clock out
+    if (!existing.clockOut) {
+      existing.clockOut = time;
+      existing.status   = "completed";
+      console.log(`Clock OUT: ${name} at ${time}`);
+
+      io.emit("attendanceUpdate", {
+        record:     existing,
+        allRecords: attendanceLog,
+        type:       "clockout"
+      });
+
+      return res.json({ success:true, type:"clockout", record:existing });
+    } else {
+      // already has both clock in and out
+      console.log(`Already completed: ${name}`);
+      return res.json({ message:"Already completed", record:existing });
+    }
   }
 
-  const record = { name, time, date, status: status || "present" };
+  // first recognition = clock in
+  const record = {
+    name,
+    date,
+    clockIn:  time,
+    clockOut: null,
+    status:   "present"
+  };
+
   attendanceLog.push(record);
+  console.log(`Clock IN: ${name} at ${time}`);
 
-  console.log(`Attendance marked: ${name} at ${time}`);
-
-  // push to all connected frontend clients instantly
   io.emit("attendanceUpdate", {
     record,
-    allRecords: attendanceLog
+    allRecords: attendanceLog,
+    type:       "clockin"
   });
 
-  res.json({ success: true, record });
+  res.json({ success:true, type:"clockin", record });
 });
 
-// frontend fetches full log on page load
 app.get("/attendance", (req, res) => {
   res.json(attendanceLog);
+});
+
+app.delete("/attendance", (req, res) => {
+  attendanceLog = [];
+  io.emit("attendanceUpdate", { record:null, allRecords:[], type:"clear" });
+  console.log("Attendance cleared");
+  res.json({ success:true });
 });
 
 // ── motion log ──
@@ -97,6 +127,21 @@ app.delete("/motion", (req, res) => {
   res.json({ success: true });
 });
 
+// ── bed stats ──
+let bedStats = { total:0, occupied:0, empty:0, time:null, date:null };
+
+app.post("/beds", (req, res) => {
+  const { total, occupied, empty, time, date } = req.body;
+  bedStats = { total, occupied, empty, time, date };
+  console.log(`Beds — Total:${total} Occupied:${occupied} Empty:${empty}`);
+  io.emit("bedUpdate", bedStats);
+  res.json({ success:true });
+});
+
+app.get("/beds", (req, res) => {
+  res.json(bedStats);
+});
+
 // ── Socket ──
 io.on("connection", (socket) => {
   console.log("Client connected:", socket.id);
@@ -128,7 +173,17 @@ port.on("error", (err) => {
 
 const parser = port.pipe(new ReadlineParser({ delimiter: "\n" }));
 
-parser.on("data", (data) => {
+console.log("ENV CHECK:", {
+  SID: process.env.TWILIO_SID,
+  AUTH: process.env.TWILIO_AUTH,
+  FROM: process.env.TWILIO_PHONE,
+  TO: process.env.ALERT_PHONE
+});
+
+//SMS Alert Function
+let alertSent = false;
+
+parser.on("data", async(data) => {
   const clean = data.trim();
   console.log("Bluetooth Data:", clean);
 
@@ -157,6 +212,40 @@ parser.on("data", (data) => {
       fireAlert: isFireAlert,
     });
   }
+  if ((isTempAlert || isFireAlert) && !alertSent) {
+    console.log("Sending SMS...");
+
+    let msg = "?? HOSPITAL ALERT:\n";
+    if (isTempAlert) msg += "?? High Temp/Humidity\n";
+    if (isFireAlert) msg += "?? Fire Detected\n";
+
+    await sendSMS(msg);
+    alertSent = true;
+}
+
+if (!isTempAlert && !isFireAlert) {
+    alertSent = false;
+}
+
+});
+
+app.post("/test-alert", async (req, res) => {
+
+  const { tempAlert, fireAlert } = req.body;
+
+  io.emit("hospitalAlert", { tempAlert, fireAlert });
+
+  if (tempAlert || fireAlert) {
+    console.log("Sending SMS...");
+
+    let msg = "🚨 HOSPITAL ALERT:\n";
+    if (tempAlert) msg += "🔥 High Temp/Humidity\n";
+    if (fireAlert) msg += "🔥 Fire Detected\n";
+
+    await sendSMS(msg);
+  }
+
+  res.json({ success: true });
 });
 
 // ── Start Server ──
